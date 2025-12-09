@@ -30,9 +30,24 @@ from livekit.plugins.turn_detector.english import EnglishModel
 
 
 # load environment variables, this is optional, only used for local development
-load_dotenv(dotenv_path=".env.agent")
+load_dotenv(dotenv_path="secrets.env")
+
+# Force HF_HOME to the location where we downloaded models in the Dockerfile
+os.environ["HF_HOME"] = "/opt/huggingface"
+
 logger = logging.getLogger("outbound-caller")
 logger.setLevel(logging.INFO)
+
+# Debug Environment
+hf_home = os.getenv("HF_HOME")
+print(f"DEBUG: User ID: {os.getuid()}")
+print(f"DEBUG: HF_HOME (Forced): {hf_home}")
+if hf_home and os.path.exists(hf_home):
+    print(f"DEBUG: Listing {hf_home}:")
+    for root, dirs, files in os.walk(hf_home):
+        print(f"  {root}: {files}")
+else:
+    print(f"DEBUG: HF_HOME not found or empty: {hf_home}")
 
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID") or os.getenv("SIP_TRUNK_ID")
 
@@ -165,8 +180,25 @@ class OutboundCaller(Agent):
         await self.hangup()
 
 
+# Pre-load models to reduce latency
+logger.info("Pre-loading models...")
+try:
+    _vad_model = silero.VAD.load()
+    logger.info("VAD model pre-loaded")
+except Exception as e:
+    logger.warning(f"Could not pre-load VAD model: {e}")
+    _vad_model = None
+
+# EnglishModel requires job context, so we cannot pre-load it globally
+# _turn_detector = EnglishModel()
+
 async def entrypoint(ctx: JobContext):
     logger.info(f"connecting to room {ctx.room.name}")
+    
+    # Debug Environment within entrypoint
+    hf_home = os.getenv("HF_HOME")
+    logger.info(f"DEBUG ENTRYPOINT: HF_HOME: {hf_home}")
+    
     await ctx.connect()
 
     # when dispatching the agent, we'll pass it the approriate info to dial the user
@@ -191,17 +223,23 @@ async def entrypoint(ctx: JobContext):
         dial_info=dial_info,
     )
 
-    # the following uses GPT-4o, Deepgram and Cartesia
-    session = AgentSession(
-        turn_detection=EnglishModel(),
-        vad=silero.VAD.load(),
-        stt=deepgram.STT(),
-        # you can also use OpenAI's TTS with openai.TTS()
-        tts=cartesia.TTS(),
-        llm=openai.LLM(model="gpt-4o"),
-        # you can also use a speech-to-speech model like OpenAI's Realtime API
-        # llm=openai.realtime.RealtimeModel()
-    )
+    logger.info("Initializing AgentSession and Plugins...")
+    try:
+        # the following uses GPT-4o, Deepgram and Cartesia
+        session = AgentSession(
+            turn_detection=EnglishModel(),
+            vad=_vad_model or silero.VAD.load(),
+            stt=deepgram.STT(),
+            # you can also use OpenAI's TTS with openai.TTS()
+            tts=cartesia.TTS(),
+            llm=openai.LLM(model="gpt-4o"),
+            # you can also use a speech-to-speech model like OpenAI's Realtime API
+            # llm=openai.realtime.RealtimeModel()
+        )
+        logger.info("AgentSession initialized successfully")
+    except Exception as e:
+        logger.error(f"Failed to initialize AgentSession or Plugins: {e}", exc_info=True)
+        raise e
 
     # start the session first before dialing, to ensure that when the user picks up
     # the agent does not miss anything the user says

@@ -17,10 +17,13 @@ RUN pip install --break-system-packages -r requirements.txt
 COPY . .
 
 # Set environment variables
-ENV HF_HOME=/cortex/.cache/
+ENV HF_HOME=/opt/huggingface
 
 # Download model files
 RUN python3 main.py download-files
+
+# Ensure permissions
+RUN chmod -R 777 /opt/huggingface
 
 # Expose port
 EXPOSE 8081

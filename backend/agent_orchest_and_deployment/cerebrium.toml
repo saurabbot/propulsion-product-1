@@ -3,12 +3,12 @@ name = "outbound-livekit-agent"
 python_version = "3.11"
 docker_base_image_url = ""
 disable_auth = false
-include = ['main.py', 'cerebrium.toml', 'requirements.txt', 'Dockerfile', '.env', 'voice_pipeline_agent.py', 'outbound-trunk.json', 'required_data.txt', 'test.py']
+include = ['main.py', 'cerebrium.toml', 'requirements.txt', 'Dockerfile', 'secrets.env']
 # exclude = ['venv', '__pycache__', '.*']
 
 [cerebrium.hardware]
-cpu = 2
-memory = 8.0
+cpu = 4
+memory = 16.0
 compute = "CPU"
 
 [cerebrium.scaling]
