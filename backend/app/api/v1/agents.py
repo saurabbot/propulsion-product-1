@@ -343,7 +343,7 @@ async def dispatch_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
     
     # Determine agent name for LiveKit
-    agent_name = "outbound-caller"  # Default LiveKit agent name
+    agent_name = "resturant_receptionist"  # Default LiveKit agent name
     
     # Build metadata with agent info and dispatch details
     metadata = {

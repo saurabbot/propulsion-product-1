@@ -26,12 +26,12 @@ from livekit.plugins import (
     silero,
     noise_cancellation,  # noqa: F401
 )
-from livekit.plugins.turn_detector.english import EnglishModel
+# EnglishModel turn detector removed - using server-side VAD instead
 
 
 # load environment variables, this is optional, only used for local development
 load_dotenv(dotenv_path=".env.agent")
-logger = logging.getLogger("outbound-caller")
+logger = logging.getLogger("resturant_receptionist")
 logger.setLevel(logging.INFO)
 
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID") or os.getenv("SIP_TRUNK_ID")
@@ -193,12 +193,11 @@ async def entrypoint(ctx: JobContext):
 
     # the following uses GPT-4o, Deepgram and Cartesia
     session = AgentSession(
-        turn_detection=EnglishModel(),
         vad=silero.VAD.load(),
         stt=deepgram.STT(),
         # you can also use OpenAI's TTS with openai.TTS()
         tts=cartesia.TTS(),
-        llm=openai.LLM(model="gpt-4o"),
+        llm=openai.LLM(model="gpt-4o-mini"),
         # you can also use a speech-to-speech model like OpenAI's Realtime API
         # llm=openai.realtime.RealtimeModel()
     )
@@ -225,17 +224,16 @@ async def entrypoint(ctx: JobContext):
                     sip_trunk_id=outbound_trunk_id,
                     sip_call_to=phone_number,
                     participant_identity=participant_identity,
-                    # function blocks until user answers the call, or if the call fails
-                    wait_until_answered=True,
+                  
                 )
             )
 
-            # wait for the agent session start and participant join
-            await session_started
+            # wait for the participant join
             participant = await ctx.wait_for_participant(identity=participant_identity)
             logger.info(f"participant joined: {participant.identity}")
 
             agent.set_participant(participant)
+            await session.generate_reply(instructions="Say hello and ask how you can help with a reservation.")
 
         except api.TwirpError as e:
             logger.error(
@@ -257,6 +255,6 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="outbound-caller",
+            agent_name="resturant_receptionist",
         )
     )
