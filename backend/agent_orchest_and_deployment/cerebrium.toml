@@ -7,9 +7,9 @@ include = ['main.py', 'cerebrium.toml', 'requirements.txt', 'Dockerfile', '.env'
 # exclude = ['venv', '__pycache__', '.*']
 
 [cerebrium.hardware]
-cpu = 2
-memory = 8.0
-compute = "CPU"
+cpu = 4
+memory = 16.0
+compute = "NVIDIA A10G"
 
 [cerebrium.scaling]
 min_replicas = 1
