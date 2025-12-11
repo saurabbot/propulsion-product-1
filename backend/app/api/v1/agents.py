@@ -9,10 +9,12 @@ import logging
 import subprocess
 import json
 import re
+import os
 
 from app.core.database import get_db
 from app.models.agent import Agent
 from app.services.agent_runner import AgentProcessManager
+import requests
 
 logger = logging.getLogger(__name__)
 
@@ -343,7 +345,7 @@ async def dispatch_agent(
         raise HTTPException(status_code=404, detail="Agent not found")
     
     # Determine agent name for LiveKit
-    agent_name = "resturant_receptionist"  # Default LiveKit agent name
+    agent_name = "restaurant_receptionist"  # Default LiveKit agent name
     
     # Build metadata with agent info and dispatch details
     metadata = {
@@ -355,56 +357,190 @@ async def dispatch_agent(
     }
     
     try:
-        # Execute LiveKit dispatch command
-        cmd = [
-            "lk", "dispatch", "create",
-            "--new-room",
-            "--agent-name", agent_name,
-            "--metadata", json.dumps(metadata)
-        ]
+        # Get LiveKit credentials from environment
+        livekit_url = os.getenv("LIVEKIT_URL")
+        livekit_api_key = os.getenv("LIVEKIT_API_KEY")
+        livekit_api_secret = os.getenv("LIVEKIT_API_SECRET")
         
-        logger.info(f"Dispatching agent {agent_id} with command: {' '.join(cmd)}")
-        result = subprocess.run(
-            cmd,
-            capture_output=True,
-            text=True,
-            timeout=30
-        )
-        
-        if result.returncode != 0:
-            error_msg = result.stderr or result.stdout or "Unknown error"
-            logger.error(f"Dispatch failed for agent {agent_id}: {error_msg}")
+        if not all([livekit_url, livekit_api_key, livekit_api_secret]):
             raise HTTPException(
                 status_code=500,
-                detail=f"Failed to dispatch agent: {error_msg}"
+                detail="LiveKit credentials not configured. Please set LIVEKIT_URL, LIVEKIT_API_KEY, and LIVEKIT_API_SECRET environment variables."
             )
         
-        # Parse dispatch response
-        output = result.stdout
-        dispatch_id = None
-        room_name = None
+        # Generate room name
+        room_name = f"room-{uuid.uuid4().hex[:12]}"
         
-        # Extract dispatch ID (format: id:"AD_xxxxx")
-        dispatch_match = re.search(r'id:"([^"]+)"', output)
-        if dispatch_match:
-            dispatch_id = dispatch_match.group(1)
-        
-        # Extract room name (format: room:"room-xxxxx")
-        room_match = re.search(r'room:"([^"]+)"', output)
-        if room_match:
-            room_name = room_match.group(1)
-        
-        if not dispatch_id or not room_name:
-            logger.warning(f"Could not parse dispatch response: {output}")
-            # Try to extract from any format
-            if not dispatch_id:
-                dispatch_match = re.search(r'Dispatch created:.*?id[:\s]+([^\s,]+)', output)
-                if dispatch_match:
-                    dispatch_id = dispatch_match.group(1)
-            if not room_name:
-                room_match = re.search(r'room[:\s]+([^\s,]+)', output)
-                if room_match:
-                    room_name = room_match.group(1)
+        # Use LiveKit Python SDK if available, otherwise fall back to HTTP API
+        try:
+            from livekit import api as livekit_api
+            
+            # Set environment variables for LiveKit API (it reads from env vars)
+            original_env = {}
+            env_vars = {
+                "LIVEKIT_URL": livekit_url,
+                "LIVEKIT_API_KEY": livekit_api_key,
+                "LIVEKIT_API_SECRET": livekit_api_secret,
+            }
+            
+            # Temporarily set environment variables
+            for key, value in env_vars.items():
+                original_env[key] = os.environ.get(key)
+                os.environ[key] = value
+            
+            try:
+                # Initialize LiveKit API client (reads from env vars)
+                lkapi = livekit_api.LiveKitAPI()
+                
+                # Create dispatch using LiveKit API (async)
+                logger.info(f"Dispatching agent {agent_id} to room {room_name} with agent {agent_name}")
+                
+                dispatch_resp = await lkapi.agent_dispatch.create_dispatch(
+                    livekit_api.CreateAgentDispatchRequest(
+                        agent_name=agent_name,
+                        room=room_name,
+                        metadata=json.dumps(metadata),
+                    )
+                )
+                
+                await lkapi.aclose()
+                
+                # Log response structure for debugging
+                logger.info(f"LiveKit API response type: {type(dispatch_resp)}")
+                logger.info(f"LiveKit API response attributes: {dir(dispatch_resp)}")
+                logger.info(f"LiveKit API response: {dispatch_resp}")
+                
+                # Extract dispatch_id and room from response
+                # Try different possible attribute names
+                dispatch_id = None
+                if hasattr(dispatch_resp, 'dispatch_id'):
+                    dispatch_id = dispatch_resp.dispatch_id
+                elif hasattr(dispatch_resp, 'id'):
+                    dispatch_id = dispatch_resp.id
+                elif hasattr(dispatch_resp, 'dispatchId'):
+                    dispatch_id = dispatch_resp.dispatchId
+                elif isinstance(dispatch_resp, dict):
+                    dispatch_id = dispatch_resp.get('dispatch_id') or dispatch_resp.get('id') or dispatch_resp.get('dispatchId')
+                
+                response_room = None
+                if hasattr(dispatch_resp, 'room'):
+                    response_room = dispatch_resp.room
+                elif isinstance(dispatch_resp, dict):
+                    response_room = dispatch_resp.get('room')
+                
+                room_name = response_room or room_name
+                
+                if not dispatch_id:
+                    logger.error(f"Dispatch ID not found in response. Response object: {dispatch_resp}, Type: {type(dispatch_resp)}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"Failed to get dispatch ID from LiveKit API response. Response: {str(dispatch_resp)}"
+                    )
+                
+                logger.info(f"Successfully created dispatch: {dispatch_id} for room: {room_name}")
+                
+            finally:
+                # Restore original environment variables
+                for key, original_value in original_env.items():
+                    if original_value is None:
+                        os.environ.pop(key, None)
+                    else:
+                        os.environ[key] = original_value
+            
+        except ImportError as e:
+            logger.warning(f"LiveKit SDK not available, using HTTP fallback: {e}")
+            # Fallback to HTTP API if Python SDK not available
+            api_base_url = livekit_url.rstrip('/')
+            dispatch_url = f"{api_base_url}/twirp/livekit.DispatchService/CreateDispatch"
+            
+            dispatch_payload = {
+                "agent_name": agent_name,
+                "room": room_name,
+                "metadata": json.dumps(metadata),
+            }
+            
+            logger.info(f"Dispatching agent {agent_id} to room {room_name} with agent {agent_name}")
+            
+            # Create JWT token for LiveKit API authentication
+            import jwt
+            import time
+            
+            now = int(time.time())
+            exp = now + 3600
+            
+            token_payload = {
+                "iss": livekit_api_key,
+                "exp": exp,
+            }
+            
+            access_token = jwt.encode(token_payload, livekit_api_secret, algorithm="HS256")
+            
+            try:
+                logger.info(f"Calling LiveKit API: {dispatch_url}")
+                response = requests.post(
+                    dispatch_url,
+                    json=dispatch_payload,
+                    headers={
+                        "Authorization": f"Bearer {access_token}",
+                        "Content-Type": "application/json",
+                    },
+                    timeout=30,
+                )
+                
+                logger.info(f"LiveKit API response status: {response.status_code}")
+                logger.info(f"LiveKit API response headers: {dict(response.headers)}")
+                
+                if response.status_code != 200:
+                    error_msg = response.text or f"HTTP {response.status_code}"
+                    logger.error(f"LiveKit API error (status {response.status_code}): {error_msg}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"LiveKit API error: {error_msg}"
+                    )
+                
+                if not response.text or not response.text.strip():
+                    logger.error("LiveKit API returned empty response")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="LiveKit API returned empty response"
+                    )
+                
+                try:
+                    dispatch_data = response.json()
+                except json.JSONDecodeError as e:
+                    logger.error(f"Failed to parse LiveKit API response as JSON: {response.text[:500]}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail=f"LiveKit API returned invalid JSON: {str(e)}"
+                    )
+                
+                logger.info(f"LiveKit API response data: {dispatch_data}")
+                
+                dispatch_id = dispatch_data.get("dispatch_id") or dispatch_data.get("id")
+                room_name = dispatch_data.get("room") or room_name
+                
+                if not dispatch_id:
+                    logger.error(f"Dispatch ID not found in response: {dispatch_data}")
+                    raise HTTPException(
+                        status_code=500,
+                        detail="Failed to get dispatch ID from LiveKit API response"
+                    )
+                
+                logger.info(f"Successfully created dispatch: {dispatch_id} for room: {room_name}")
+            except HTTPException:
+                raise
+            except requests.RequestException as e:
+                logger.error(f"HTTP request error: {e}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to connect to LiveKit API: {str(e)}"
+                )
+            except json.JSONDecodeError as e:
+                logger.error(f"JSON decode error: {e}", exc_info=True)
+                raise HTTPException(
+                    status_code=500,
+                    detail=f"Failed to parse LiveKit API response: {str(e)}"
+                )
         
         # Update agent with deployment details
         from datetime import datetime
@@ -416,7 +552,8 @@ async def dispatch_agent(
         agent.deployment_metadata = {
             "phone_number": dispatch.phone_number,
             "transfer_to": dispatch.transfer_to,
-            "dispatch_output": output,
+            "dispatch_id": dispatch_id,
+            "room_name": room_name,
         }
         
         await db.commit()
@@ -428,7 +565,6 @@ async def dispatch_agent(
             "message": "Agent dispatched successfully",
             "dispatch_id": dispatch_id,
             "room_name": room_name,
-            "output": output,
             "agent": AgentResponse(
                 id=str(agent.id),
                 agent_type=agent.agent_type,
@@ -444,13 +580,8 @@ async def dispatch_agent(
             )
         }
         
-    except subprocess.TimeoutExpired:
-        raise HTTPException(status_code=504, detail="Dispatch command timed out")
-    except FileNotFoundError:
-        raise HTTPException(
-            status_code=500,
-            detail="LiveKit CLI not found. Please install it: npm install -g livekit-cli"
-        )
+    except HTTPException:
+        raise
     except Exception as e:
         logger.error(f"Error dispatching agent {agent_id}: {e}", exc_info=True)
         raise HTTPException(status_code=500, detail=f"Failed to dispatch agent: {str(e)}")

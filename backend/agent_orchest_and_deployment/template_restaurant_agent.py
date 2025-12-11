@@ -31,7 +31,7 @@ from livekit.plugins import (
 
 # load environment variables, this is optional, only used for local development
 load_dotenv(dotenv_path=".env.agent")
-logger = logging.getLogger("resturant_receptionist")
+logger = logging.getLogger("restaurant_receptionist")
 logger.setLevel(logging.INFO)
 
 outbound_trunk_id = os.getenv("SIP_OUTBOUND_TRUNK_ID") or os.getenv("SIP_TRUNK_ID")
@@ -255,6 +255,6 @@ if __name__ == "__main__":
     cli.run_app(
         WorkerOptions(
             entrypoint_fnc=entrypoint,
-            agent_name="resturant_receptionist",
+            agent_name="restaurant_receptionist",
         )
     )

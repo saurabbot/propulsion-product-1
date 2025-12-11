@@ -26,8 +26,12 @@ engine = create_async_engine(
     database_url,
     echo=True,
     future=True,
+    pool_pre_ping=True,  # Check connection before use
+    pool_recycle=300,    # Recycle connections before Neon scales to zero
     connect_args={
-        "ssl": True
+        "ssl": True,
+        # If you see prepared statement issues:
+        # "prepared_statement_cache_size": 0
     }
 )
 
